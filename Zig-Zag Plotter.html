@@ -1,0 +1,318 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Zig-Zag Manoeuvre Report</title>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <style>
+    body{margin:0;background:#f5f7fa;color:#17202a;font-family:Arial,Helvetica,sans-serif}
+    main{max-width:1120px;margin:0 auto;padding:24px}
+    h1{font-size:28px;margin:0 0 16px}
+    section{background:#fff;border:1px solid #d8dee8;border-radius:8px;padding:16px;margin-bottom:16px}
+    label{display:block;font-weight:700;margin:12px 0 6px}
+    input{height:36px;box-sizing:border-box;min-width:260px}
+    button{height:38px;border-radius:6px;border:1px solid #0f5f8f;background:#0f6fa8;color:white;font-weight:700;padding:0 14px;cursor:pointer}
+    button.secondary{background:#fff;color:#0f5f8f}
+    .actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:14px;align-items:center}
+    .metrics{display:grid;grid-template-columns:repeat(4,minmax(130px,1fr));gap:10px}
+    .metric{border:1px solid #e0e5ec;border-radius:8px;padding:10px;background:#fbfcfd}
+    .metric span{display:block;color:#5f6c7b;font-size:12px}
+    .metric strong{display:block;margin-top:5px;font-size:18px}
+    canvas{width:100%;height:680px;border:1px solid #b9b9b9;border-radius:2px;background:white}
+    table{width:100%;border-collapse:collapse;font-size:13px}
+    td,th{border:1px solid #e5e9f0;padding:8px;text-align:left;vertical-align:top}
+    th{background:#eaf3fb}
+    .note{color:#5f6c7b;font-size:13px;line-height:1.45}
+    .report-page{background:#fff;color:#111;padding:16px}
+    .report-page img{width:100%;max-width:980px;border:1px solid #d9dee7}
+    #wordLink{display:none}
+    @media(max-width:800px){.metrics{grid-template-columns:1fr 1fr}input{width:100%;min-width:0}}
+    @media print{
+      body{background:white}
+      main>section:not(#reportSection),main>h1{display:none}
+      #reportSection{display:block;border:0;padding:0;margin:0}
+      #reportSection h2,#reportSection>.note,#reportSection>.actions{display:none}
+      .report-page{padding:0}.report-page img{max-width:100%;border:0}
+      @page{size:A4 landscape;margin:10mm}
+    }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Zig-Zag Manoeuvre Report</h1>
+  <section>
+    <p class="note">Upload an Excel file with timestamp, gyro/heading, and steering command. Use Recommend timestamps if you are unsure where to start/end.</p>
+    <label>Excel file</label>
+    <input id="file" type="file" accept=".xlsx,.xlsm,.xls" />
+    <label>Start timestamp for t=0</label>
+    <input id="startTime" type="text" placeholder="Auto or e.g. 11:31:50" />
+    <label>End timestamp</label>
+    <input id="endTime" type="text" placeholder="Auto or e.g. 11:34:20" />
+    <label>Zig-zag angle (degrees)</label>
+    <input id="zigzagAngle" type="number" step="0.1" placeholder="Auto from steering command" />
+    <label>Plot title</label>
+    <input id="plotTitle" type="text" placeholder="Auto, e.g. ZIG-ZAG 20-20 (S)" />
+    <label>Speed label</label>
+    <input id="speedLabel" type="text" value="SPEED -14 KNOTS" />
+    <div class="actions">
+      <button id="recommend" class="secondary">Recommend timestamps</button>
+      <button id="run">Generate plot</button>
+      <button id="pdf">Prepare Save as PDF</button>
+      <button id="word">Prepare Word Report</button>
+      <a id="wordLink" download="zig_zag_manoeuvre_report.doc">Download Word report</a>
+    </div>
+    <p class="note" id="recommendation">Upload a workbook, then use Recommend timestamps if needed.</p>
+  </section>
+  <section>
+    <div class="metrics">
+      <div class="metric"><span>First overshoot angle</span><strong id="firstOvershoot">-</strong></div>
+      <div class="metric"><span>Second overshoot angle</span><strong id="secondOvershoot">-</strong></div>
+      <div class="metric"><span>Initial gyro</span><strong id="startGyro">-</strong></div>
+      <div class="metric"><span>Duration</span><strong id="duration">-</strong></div>
+    </div>
+  </section>
+  <section>
+    <canvas id="plot" width="1200" height="760"></canvas>
+    <p class="note" id="pointInfo">Move over the green heading curve to inspect points.</p>
+  </section>
+  <section>
+    <table><tbody id="checks"><tr><td>Status</td><td>Upload a workbook to calculate.</td></tr></tbody></table>
+  </section>
+  <section id="reportSection" style="display:none">
+    <h2>Printable Report</h2>
+    <p class="note">Click Save as PDF, then choose the destination from the browser print dialog.</p>
+    <div class="actions"><button id="printReport">Save as PDF</button></div>
+    <div id="printableReport"></div>
+  </section>
+</main>
+<script>
+let latest=null, detected=null;
+const norm=s=>String(s||"").toLowerCase().replace(/[^a-z0-9]/g,"");
+function getNum(v){if(typeof v==="number"&&Number.isFinite(v))return v;if(typeof v==="string"){const n=Number(v.replace(/,/g,"").trim());if(Number.isFinite(n))return n;}return null;}
+function excelTimeToSeconds(v){
+  if(v instanceof Date)return v.getHours()*3600+v.getMinutes()*60+v.getSeconds()+v.getMilliseconds()/1000;
+  if(typeof v==="number")return v<1?v*86400:v;
+  const s=String(v||"").trim(),m=s.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+  if(m)return +m[1]*3600 + +m[2]*60 + +(m[3]||0);
+  return null;
+}
+function parseClockText(text){
+  const s=String(text||"").trim(); if(!s)return null;
+  const d=new Date(s.replace(" ","T")); if(!Number.isNaN(d.getTime()))return d.getHours()*3600+d.getMinutes()*60+d.getSeconds();
+  const sec=excelTimeToSeconds(s); if(sec!=null)return sec;
+  const n=Number(s); if(Number.isFinite(n))return n>10000?n%86400:n;
+  throw Error("Invalid timestamp: "+text);
+}
+function timeLabel(seconds){if(seconds==null)return "-";const s=Math.round(seconds)%86400,h=Math.floor(s/3600),m=Math.floor((s%3600)/60),sec=s%60;return [h,m,sec].map(x=>String(x).padStart(2,"0")).join(":");}
+function readCoord(value){const m=String(value||"").match(/^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)/);return m?{t:Number(m[1]),value:Number(m[2])}:null;}
+function readWorkbook(wb){
+  for(const name of wb.SheetNames){
+    const data=XLSX.utils.sheet_to_json(wb.Sheets[name],{header:1,raw:true,cellDates:true});
+    const processed=readProcessedSheet(data,name); if(processed.rows.length>=6)return processed;
+    const raw=readRawSheet(data,name); if(raw.rows.length>=6)return raw;
+  }
+  throw Error("Could not find timestamp, gyro/heading, and steering command columns.");
+}
+function readProcessedSheet(data,sheetName){
+  for(let h=0;h<Math.min(15,data.length);h++){
+    const headers=(data[h]||[]).map(norm);
+    const gyroCol=headers.findIndex(x=>["gyro","gyroreading"].includes(x));
+    const rudderCoord=headers.findIndex(x=>x==="rudderanglecoordinates");
+    const headingCoord=headers.findIndex(x=>x==="headinganglecoordinates");
+    if(gyroCol<0||rudderCoord<0||headingCoord<0)continue;
+    const commandCol=gyroCol+1, elapsedCol=Math.max(0,rudderCoord-1), headingValueCol=headingCoord+1, rows=[];
+    for(let r=h+1;r<data.length;r++){
+      const row=data[r]||[], gyro=getNum(row[gyroCol]), elapsed=getNum(row[elapsedCol]);
+      const heading=getNum(row[headingValueCol]) ?? readCoord(row[headingCoord])?.value;
+      const command=getNum(row[commandCol]) ?? readCoord(row[rudderCoord])?.value;
+      const clock=excelTimeToSeconds(row[2]);
+      if(elapsed==null||heading==null)continue;
+      rows.push({sourceRow:r+1,t:elapsed,clockSeconds:clock,gyro,headingAngle:heading,command,processed:true});
+    }
+    rows.sort((a,b)=>a.t-b.t);
+    return {sheetName,mode:"processed",rows:dedupe(rows,"t")};
+  }
+  return {sheetName,mode:"processed",rows:[]};
+}
+function readRawSheet(data,sheetName){
+  for(let h=0;h<Math.min(25,data.length);h++){
+    const idx={};
+    (data[h]||[]).map(norm).forEach((x,i)=>{
+      if(["timestamp","time","dgpstimestamp","ibstimestamp"].includes(x)&&idx.time==null)idx.time=i;
+      if(["gyro","gyroheading","heading","headingangle","gyroreading"].includes(x))idx.gyro=i;
+      if(["steeringcommand","ruddercommand","rudderangle","thrusterangle","thrustercommand","command"].includes(x))idx.command=i;
+    });
+    if(idx.time==null||idx.gyro==null)continue;
+    const rows=[];
+    for(let r=h+1;r<data.length;r++){
+      const row=data[r]||[], t=excelTimeToSeconds(row[idx.time]), gyro=getNum(row[idx.gyro]), command=getNum(row[idx.command]);
+      if(t==null||gyro==null)continue;
+      rows.push({sourceRow:r+1,clockSeconds:t,gyro,command,processed:false});
+    }
+    rows.sort((a,b)=>a.clockSeconds-b.clockSeconds);
+    return {sheetName,mode:"raw",rows:dedupe(rows,"clockSeconds")};
+  }
+  return {sheetName,mode:"raw",rows:[]};
+}
+function dedupe(rows,key){return rows.filter((r,i,a)=>i===0||r[key]!==a[i-1][key]);}
+function unwrapDelta(prev,curr){return ((curr-prev+540)%360)-180;}
+function detectZigZagAngle(rows){
+  const values=rows.map(r=>Math.abs(r.command)).filter(v=>Number.isFinite(v)&&v>=4);
+  if(!values.length)return 10;
+  values.sort((a,b)=>a-b);
+  return Math.max(5,Math.round(values[Math.floor(values.length/2)]/5)*5);
+}
+function sliceRows(dataset,startText,endText){
+  let rows=dataset.rows.map(r=>({...r}));
+  if(dataset.mode==="processed"){
+    const start=parseClockText(startText), end=parseClockText(endText);
+    if(start!=null)rows=rows.filter(r=>r.clockSeconds==null||r.clockSeconds>=start);
+    if(end!=null)rows=rows.filter(r=>r.clockSeconds==null||r.clockSeconds<=end);
+    if(rows.length){const origin=rows[0].t||0; rows.forEach(r=>r.t=(r.t||0)-origin);}
+  }else{
+    const start=parseClockText(startText) ?? rows[0].clockSeconds;
+    const end=parseClockText(endText) ?? rows[rows.length-1].clockSeconds;
+    rows=rows.filter(r=>r.clockSeconds>=start&&r.clockSeconds<=end);
+    if(rows.length){
+      let heading=rows[0].gyro;
+      rows[0].headingAngle=0; rows[0].t=0;
+      for(let i=1;i<rows.length;i++){
+        heading+=unwrapDelta(rows[i-1].gyro,rows[i].gyro);
+        rows[i].t=rows[i].clockSeconds-start;
+        rows[i].headingAngle=heading-rows[0].gyro;
+      }
+      const first=rows.find(r=>Math.abs(r.headingAngle)>=Math.max(2,detectZigZagAngle(rows)*.35));
+      const sign=(first?.headingAngle||1)>=0?1:-1;
+      rows.forEach(r=>r.headingAngle*=sign);
+    }
+  }
+  if(rows.length<6)throw Error("Not enough rows in the selected time range.");
+  return rows;
+}
+function buildZigZagRudderCommand(rows,angle){
+  const measured=rows.filter(r=>Number.isFinite(r.command));
+  if(measured.some(r=>Math.abs(r.command)>=angle*.4)){
+    const firstCommand=measured.find(r=>Math.abs(r.command)>=angle*.4);
+    const firstHeading=rows.find(r=>Math.abs(r.headingAngle)>=Math.max(2,angle*.35));
+    const signFactor=Math.sign(firstHeading?.headingAngle||firstCommand.command||1)/Math.sign(firstCommand.command||1);
+    return rows.map(r=>{
+      let value=0;
+      if(Number.isFinite(r.command)&&Math.abs(r.command)>=angle*.4)value=Math.sign(r.command)*signFactor*angle;
+      return {t:r.t,value};
+    });
+  }
+  const firstHeading=rows.find(r=>Math.abs(r.headingAngle)>=angle);
+  let rudder=Math.sign(firstHeading?.headingAngle||1)*angle;
+  return rows.map(row=>{if(rudder>0&&row.headingAngle>=angle)rudder=-angle;else if(rudder<0&&row.headingAngle<=-angle)rudder=angle;return {t:row.t,value:rudder};});
+}
+function reversalIndices(command,angle){
+  const reversals=[]; let last=0;
+  command.forEach((p,i)=>{const s=Number.isFinite(p.value)&&Math.abs(p.value)>=angle*.45?Math.sign(p.value):0;if(s&&last&&s!==last)reversals.push(i);if(s)last=s;});
+  return reversals;
+}
+function segmentPeak(rows,command,angle){
+  const rev=reversalIndices(command,angle);
+  const r1=rev[0]??0, r2=rev[1]??Math.floor(rows.length*.55), r3=rev[2]??rows.length-1;
+  const firstSign=Math.sign(command.find(p=>Math.abs(p.value)>=angle*.45)?.value||1);
+  const seg1=rows.slice(r1,Math.max(r1+1,r2)), seg2=rows.slice(r2,Math.max(r2+1,r3));
+  const firstPeak=firstSign>0?seg1.reduce((b,r)=>r.headingAngle>b.headingAngle?r:b,seg1[0]):seg1.reduce((b,r)=>r.headingAngle<b.headingAngle?r:b,seg1[0]);
+  const secondPeak=firstSign>0?seg2.reduce((b,r)=>r.headingAngle<b.headingAngle?r:b,seg2[0]):seg2.reduce((b,r)=>r.headingAngle>b.headingAngle?r:b,seg2[0]);
+  return {firstPeak,secondPeak,reversals:rev};
+}
+function analyze(dataset,startText,endText,angleInput){
+  const rows=sliceRows(dataset,startText,endText);
+  const angle=Number.isFinite(angleInput)&&angleInput>0?angleInput:detectZigZagAngle(rows);
+  const command=buildZigZagRudderCommand(rows,angle);
+  const peaks=segmentPeak(rows,command,angle);
+  const firstOvershoot=Math.max(0,Math.abs(peaks.firstPeak.headingAngle)-angle);
+  const secondOvershoot=Math.max(0,Math.abs(peaks.secondPeak.headingAngle)-angle);
+  const initialSide=Math.sign(command.find(p=>Math.abs(p.value)>=angle*.45)?.value||1)>=0?"P":"S";
+  return {dataset,rows,command,angle,initialSide,firstOvershoot,secondOvershoot,...peaks,startGyro:rows[0].gyro,duration:rows[rows.length-1].t,startClock:rows[0].clockSeconds,endClock:rows[rows.length-1].clockSeconds};
+}
+function recommendWindow(dataset){
+  const rows=dataset.rows.filter(r=>r.clockSeconds!=null);
+  if(rows.length<6)throw Error("Not enough timestamped rows for recommendation.");
+  if(dataset.mode==="processed"){
+    const source=rows.filter(r=>Number.isFinite(r.command)).length>=6?rows.filter(r=>Number.isFinite(r.command)):rows;
+    return {start:source[0].clockSeconds,end:source[source.length-1].clockSeconds,angle:detectZigZagAngle(source),reason:"processed plotting range in workbook"};
+  }
+  const angle=detectZigZagAngle(rows);
+  const first=rows.findIndex(r=>Number.isFinite(r.command)&&Math.abs(r.command)>=angle*.4);
+  const startIndex=Math.max(0,first-1);
+  const trial=rows.slice(startIndex).map(r=>({...r}));
+  const base=trial[0].clockSeconds;
+  let heading=trial[0].gyro; trial[0].t=0; trial[0].headingAngle=0;
+  for(let i=1;i<trial.length;i++){heading+=unwrapDelta(trial[i-1].gyro,trial[i].gyro);trial[i].t=trial[i].clockSeconds-base;trial[i].headingAngle=heading-trial[0].gyro;}
+  const firstHead=trial.find(r=>Math.abs(r.headingAngle)>=Math.max(2,angle*.35));
+  const sign=(firstHead?.headingAngle||1)>=0?1:-1; trial.forEach(r=>r.headingAngle*=sign);
+  const rev=reversalIndices(buildZigZagRudderCommand(trial,angle),angle);
+  let end=trial[trial.length-1].clockSeconds;
+  if(rev.length>=3)end=Math.min(end,trial[rev[2]].clockSeconds+14);
+  else if(rev.length>=2)end=Math.min(end,trial[rev[1]].clockSeconds+60);
+  return {start:trial[0].clockSeconds,end,angle,reason:"before first rudder deflection through second overshoot"};
+}
+function rudderStepPoints(res){
+  const command=res.command.filter(p=>Number.isFinite(p.value));
+  if(!command.length)return [];
+  const points=[{t:command[0].t,value:command[0].value}]; let current=command[0].value;
+  for(const p of command){if(p.value===current)continue;points.push({t:p.t,value:current});points.push({t:p.t,value:p.value});current=p.value;}
+  points.push({t:command[command.length-1].t,value:current});
+  return points;
+}
+function draw(res){
+  const c=document.getElementById("plot"),ctx=c.getContext("2d");
+  ctx.clearRect(0,0,c.width,c.height); ctx.fillStyle="#fff";ctx.fillRect(0,0,c.width,c.height);
+  const maxX=Math.max(150,Math.ceil(res.duration/10)*10),minY=-55,maxY=55,padL=145,padR=90,padT=124,padB=96;
+  const sx=(c.width-padL-padR)/maxX,sy=(c.height-padT-padB)/(maxY-minY),tx=x=>padL+x*sx,ty=y=>c.height-padB-(y-minY)*sy;
+  ctx.strokeStyle="#4a4a4a";ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(0,18);ctx.lineTo(c.width,18);ctx.stroke();
+  ctx.strokeStyle="#5f5f5f";ctx.lineWidth=1.4;ctx.beginPath();ctx.moveTo(tx(0),ty(minY));ctx.lineTo(tx(0),ty(maxY));ctx.moveTo(tx(0),ty(0));ctx.lineTo(tx(maxX)+36,ty(0));ctx.stroke();
+  ctx.beginPath();ctx.moveTo(tx(0),ty(maxY));ctx.lineTo(tx(0)-7,ty(maxY)+18);ctx.moveTo(tx(0),ty(maxY));ctx.lineTo(tx(0)+7,ty(maxY)+18);ctx.moveTo(tx(maxX)+36,ty(0));ctx.lineTo(tx(maxX)+18,ty(0)-7);ctx.moveTo(tx(maxX)+36,ty(0));ctx.lineTo(tx(maxX)+18,ty(0)+7);ctx.stroke();
+  const title=document.getElementById("plotTitle").value.trim()||`ZIG-ZAG ${res.angle}-${res.angle} (${res.initialSide})`;
+  ctx.fillStyle="#6a6a6a";ctx.font="30px Arial";ctx.textAlign="center";ctx.fillText(title,c.width/2,58);
+  ctx.beginPath();ctx.moveTo(c.width/2-178,65);ctx.lineTo(c.width/2+178,65);ctx.stroke();
+  ctx.font="16px Arial";ctx.fillText(document.getElementById("speedLabel").value||"SPEED -14 KNOTS",c.width/2,84);
+  ctx.beginPath();ctx.moveTo(c.width/2-88,89);ctx.lineTo(c.width/2+88,89);ctx.stroke();
+  ctx.textAlign="left";ctx.font="17px Arial";ctx.fillText("psi, delta (Deg)",tx(0)-18,ty(maxY)-16);ctx.font="23px Arial";ctx.fillText("Port",50,ty(31));ctx.fillText("Starboard",34,ty(-45));ctx.font="26px Arial";ctx.fillText("Time(s)",tx(maxX)-74,ty(0)+33);
+  ctx.fillStyle="#595959";ctx.textAlign="right";ctx.font="17px Arial";ctx.fillText("0",tx(0)-17,ty(0)+6);
+  [-50,-40,-30,-20,-10,10,20,30,40,50].forEach(v=>{ctx.fillText(String(Math.abs(v)),tx(0)-17,ty(v)+6);ctx.beginPath();ctx.moveTo(tx(0)-5,ty(v));ctx.lineTo(tx(0)+5,ty(v));ctx.stroke();});
+  ctx.textAlign="center";for(let t=20;t<=maxX;t+=20){ctx.fillText(String(t),tx(t),ty(0)+25);ctx.beginPath();ctx.moveTo(tx(t),ty(0)-4);ctx.lineTo(tx(t),ty(0)+4);ctx.stroke();}
+  ctx.strokeStyle="#41ef58";ctx.lineWidth=2.6;ctx.beginPath();res.rows.forEach((p,i)=>i?ctx.lineTo(tx(p.t),ty(p.headingAngle)):ctx.moveTo(tx(p.t),ty(p.headingAngle)));ctx.stroke();
+  const pts=rudderStepPoints(res); if(pts.length){ctx.strokeStyle="#4a4a4a";ctx.lineWidth=5;ctx.lineJoin="miter";ctx.lineCap="square";ctx.beginPath();ctx.moveTo(tx(pts[0].t),ty(pts[0].value));for(let i=1;i<pts.length;i++)ctx.lineTo(tx(pts[i].t),ty(pts[i].value));ctx.stroke();}
+  ctx.fillStyle="#4f4f4f";ctx.textAlign="left";ctx.font="18px Arial";ctx.fillText("Rudder Angle delta",tx(8),ty(res.angle)+28);ctx.fillText("Heading Angle psi",tx(maxX*.68),ty(22)-8);
+  const boxW=530,boxH=70,boxX=c.width/2-210,boxY=c.height-122;ctx.strokeStyle="#6b6b6b";ctx.lineWidth=1.2;ctx.strokeRect(boxX,boxY,boxW,boxH);ctx.fillStyle="#333";ctx.font="21px Arial";ctx.textAlign="left";
+  ctx.fillText(`FIRST OVERSHOOT ANGLE        =   ${res.firstOvershoot.toFixed(2)} Deg.`,boxX+30,boxY+31);
+  ctx.fillText(`SECOND OVERSHOOT ANGLE =   ${res.secondOvershoot.toFixed(2)} Deg.`,boxX+30,boxY+58);
+  ctx.font="15px Arial";ctx.lineWidth=3;ctx.strokeStyle="#41ef58";ctx.beginPath();ctx.moveTo(c.width-300,112);ctx.lineTo(c.width-258,112);ctx.stroke();ctx.fillText("Heading angle psi",c.width-248,117);
+  ctx.strokeStyle="#565656";ctx.beginPath();ctx.moveTo(c.width-300,136);ctx.lineTo(c.width-258,136);ctx.stroke();ctx.fillText("Rudder angle vs time",c.width-248,141);
+  res._screenPts=res.rows.map((p,i)=>({i,p,sx:tx(p.t),sy:ty(p.headingAngle)}));
+}
+async function loadSelectedWorkbook(){
+  const file=document.getElementById("file").files[0]; if(!file)throw Error("Upload an Excel file first.");
+  if(!window.XLSX)throw Error("Excel parser did not load. Connect to the internet once, then refresh this page.");
+  const wb=XLSX.read(await file.arrayBuffer(),{type:"array",cellDates:true});
+  return readWorkbook(wb);
+}
+async function run(){
+  detected=await loadSelectedWorkbook();
+  latest=analyze(detected,document.getElementById("startTime").value,document.getElementById("endTime").value,getNum(document.getElementById("zigzagAngle").value));
+  draw(latest);
+  document.getElementById("firstOvershoot").textContent=latest.firstOvershoot.toFixed(2)+" deg";
+  document.getElementById("secondOvershoot").textContent=latest.secondOvershoot.toFixed(2)+" deg";
+  document.getElementById("startGyro").textContent=Number.isFinite(latest.startGyro)?latest.startGyro.toFixed(3)+" deg":"-";
+  document.getElementById("duration").textContent=latest.duration.toFixed(0)+" s";
+  document.getElementById("checks").innerHTML=`<tr><th>Item</th><th>Value</th></tr><tr><td>Sheet read</td><td>${latest.dataset.sheetName}</td></tr><tr><td>Detected zig-zag angle</td><td>${latest.angle.toFixed(2)} deg</td></tr><tr><td>t=0 timestamp</td><td>${timeLabel(latest.startClock)}</td></tr><tr><td>End timestamp</td><td>${timeLabel(latest.endClock)}</td></tr><tr><td>Rows plotted</td><td>${latest.rows.length}</td></tr><tr><td>First heading peak</td><td>${latest.firstPeak.headingAngle.toFixed(2)} deg at ${latest.firstPeak.t.toFixed(0)} s</td></tr><tr><td>Second heading peak</td><td>${latest.secondPeak.headingAngle.toFixed(2)} deg at ${latest.secondPeak.t.toFixed(0)} s</td></tr>`;
+}
+document.getElementById("run").onclick=()=>run().catch(e=>alert(e.message));
+document.getElementById("recommend").onclick=async()=>{try{detected=await loadSelectedWorkbook();const rec=recommendWindow(detected);document.getElementById("startTime").value=timeLabel(rec.start);document.getElementById("endTime").value=timeLabel(rec.end);if(!document.getElementById("zigzagAngle").value)document.getElementById("zigzagAngle").value=rec.angle;document.getElementById("recommendation").textContent=`Recommended window: ${timeLabel(rec.start)} to ${timeLabel(rec.end)} (${rec.angle}-${rec.angle}). Reason: ${rec.reason}.`;}catch(e){alert(e.message);}};
+document.getElementById("plot").onmousemove=e=>{if(!latest||!latest._screenPts)return;const c=e.currentTarget,rect=c.getBoundingClientRect(),x=(e.clientX-rect.left)*c.width/rect.width,y=(e.clientY-rect.top)*c.height/rect.height,hit=latest._screenPts.reduce((best,o)=>{const d=Math.hypot(o.sx-x,o.sy-y);return d<best.d?{...o,d}:best},{d:Infinity});if(hit.d>18){document.getElementById("pointInfo").textContent="Move over the green heading curve to inspect points.";return;}const p=hit.p;document.getElementById("pointInfo").textContent=`Point ${hit.i+1}: t=${p.t.toFixed(0)} s, time=${timeLabel(p.clockSeconds)}, gyro=${Number.isFinite(p.gyro)?p.gyro.toFixed(3):"-"} deg, heading angle=${p.headingAngle.toFixed(2)} deg, steering=${Number.isFinite(p.command)?p.command.toFixed(1):"-"} deg`;};
+document.getElementById("pdf").onclick=()=>{if(!latest)return alert("Generate the plot first.");document.getElementById("printableReport").innerHTML=buildReportHtml(document.getElementById("plot").toDataURL("image/png"));document.getElementById("reportSection").style.display="block";document.getElementById("pointInfo").textContent="Printable report is ready. Click 'Save as PDF'.";};
+document.getElementById("printReport").onclick=()=>window.print();
+document.getElementById("word").onclick=()=>{if(!latest)return alert("Generate the plot first.");const html=`<!doctype html><html><head><meta charset="utf-8"><title>Zig-Zag Manoeuvre Report</title><style>${reportCss()}</style></head><body>${buildReportHtml(document.getElementById("plot").toDataURL("image/png"))}</body></html>`;const blob=new Blob(["\ufeff",html],{type:"application/msword"}),url=URL.createObjectURL(blob),a=document.getElementById("wordLink");a.href=url;a.style.display="inline-flex";a.style.alignItems="center";a.style.height="36px";a.style.borderRadius="6px";a.style.border="1px solid #0f5f8f";a.style.color="#0f5f8f";a.style.textDecoration="none";a.style.padding="0 12px";document.getElementById("pointInfo").textContent="Word report is ready. Click Download Word report.";};
+function resultRows(){return [["Test",document.getElementById("plotTitle").value.trim()||`ZIG-ZAG ${latest.angle}-${latest.angle} (${latest.initialSide})`],["Source sheet",latest.dataset.sheetName],["Detected zig-zag angle",latest.angle.toFixed(2)+" deg"],["t=0 timestamp",timeLabel(latest.startClock)],["End timestamp",timeLabel(latest.endClock)],["Initial gyro",Number.isFinite(latest.startGyro)?latest.startGyro.toFixed(3)+" deg":"-"],["First overshoot angle",latest.firstOvershoot.toFixed(2)+" deg"],["Second overshoot angle",latest.secondOvershoot.toFixed(2)+" deg"],["First heading peak",latest.firstPeak.headingAngle.toFixed(2)+" deg at "+latest.firstPeak.t.toFixed(0)+" s"],["Second heading peak",latest.secondPeak.headingAngle.toFixed(2)+" deg at "+latest.secondPeak.t.toFixed(0)+" s"]];}
+function stepRows(){return [["1. Input","The uploaded Excel sheet is read for timestamp, gyro reading, and steering command."],["2. Trial window","Recommended timestamps start before the first rudder deflection and end after the second overshoot is visible."],["3. Time conversion","Each record is converted to elapsed seconds from t=0."],["4. Heading angle","The gyro is unwrapped and converted to relative heading angle."],["5. Rudder command","The grey rudder-angle curve follows the zig-zag rule using the detected test angle."],["6. Overshoot angles","The first and second overshoots are calculated after rudder reversals as |heading peak|-zig-zag angle."]];}
+function reportCss(){return "body{font-family:Arial,Helvetica,sans-serif;color:#111}h1{font-size:24px}h2{font-size:17px;margin-top:18px}img{width:100%;max-width:980px;border:1px solid #d9dee7}table{width:100%;border-collapse:collapse;margin-top:10px;font-size:12px}th,td{border:1px solid #d9dee7;padding:7px;text-align:left;vertical-align:top}th{background:#eaf3fb}.report-page{background:white;color:#111;padding:16px}";}
+function buildReportHtml(img){return `<div class="report-page"><h1>Zig-Zag Manoeuvre Report</h1><h2>Zig-Zag Plot</h2><img src="${img}" alt="Zig-zag plot"><h2>Final Results</h2><table><tr><th>Result</th><th>Value</th></tr>${resultRows().map(x=>`<tr><td>${x[0]}</td><td>${x[1]}</td></tr>`).join("")}</table><h2>Calculation Steps</h2><table><tr><th>Step</th><th>What was done</th></tr>${stepRows().map(x=>`<tr><td>${x[0]}</td><td>${x[1]}</td></tr>`).join("")}</table></div>`;}
+</script>
+</body>
+</html>
